@@ -75,6 +75,79 @@ export default function BadgeMaker() {
     return 'Không nhận được chi tiết lỗi từ Supabase.';
   };
 
+  const trimImageDataUrl = (dataUrl: string): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => {
+        const sourceCanvas = document.createElement('canvas');
+        sourceCanvas.width = image.width;
+        sourceCanvas.height = image.height;
+        const sourceCtx = sourceCanvas.getContext('2d');
+
+        if (!sourceCtx) {
+          reject(new Error('Không thể tạo context để xử lý ảnh.'));
+          return;
+        }
+
+        sourceCtx.drawImage(image, 0, 0);
+        const { data, width, height } = sourceCtx.getImageData(0, 0, image.width, image.height);
+
+        let minX = width;
+        let minY = height;
+        let maxX = -1;
+        let maxY = -1;
+
+        for (let y = 0; y < height; y += 1) {
+          for (let x = 0; x < width; x += 1) {
+            const index = (y * width + x) * 4;
+            const r = data[index];
+            const g = data[index + 1];
+            const b = data[index + 2];
+            const a = data[index + 3];
+
+            const isTransparent = a <= 10;
+            const isNearWhite = r >= 245 && g >= 245 && b >= 245;
+            const isBackgroundPixel = isTransparent || isNearWhite;
+
+            if (!isBackgroundPixel) {
+              if (x < minX) minX = x;
+              if (y < minY) minY = y;
+              if (x > maxX) maxX = x;
+              if (y > maxY) maxY = y;
+            }
+          }
+        }
+
+        if (maxX < minX || maxY < minY) {
+          resolve(dataUrl);
+          return;
+        }
+
+        const padding = 2;
+        const cropX = Math.max(0, minX - padding);
+        const cropY = Math.max(0, minY - padding);
+        const cropWidth = Math.min(width - cropX, maxX - minX + 1 + padding * 2);
+        const cropHeight = Math.min(height - cropY, maxY - minY + 1 + padding * 2);
+
+        const outputCanvas = document.createElement('canvas');
+        outputCanvas.width = cropWidth;
+        outputCanvas.height = cropHeight;
+        const outputCtx = outputCanvas.getContext('2d');
+
+        if (!outputCtx) {
+          reject(new Error('Không thể tạo canvas xuất ảnh.'));
+          return;
+        }
+
+        outputCtx.drawImage(sourceCanvas, cropX, cropY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
+        resolve(outputCanvas.toDataURL('image/png'));
+      };
+
+      image.onerror = () => reject(new Error('Không thể đọc dữ liệu ảnh để crop.'));
+      image.src = dataUrl;
+    });
+  };
+
   const loadSavedBadges = useCallback(async () => {
     setIsLoadingSavedBadges(true);
     setSavedBadgesError(null);
@@ -310,11 +383,12 @@ export default function BadgeMaker() {
     setIsSaving(true);
     setSaveMessage(null);
 
-    const dataURL = fabricCanvas.toDataURL({
+    const rawDataURL = fabricCanvas.toDataURL({
       format: 'png',
       quality: 1,
       multiplier: 1,
     });
+    const dataURL = await trimImageDataUrl(rawDataURL);
 
     try {
       const supabase = getSupabaseClient();
