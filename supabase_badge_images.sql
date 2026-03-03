@@ -22,6 +22,21 @@ for select
 to anon, authenticated
 using (true);
 
+drop policy if exists "allow delete badge_images" on public.badge_images;
+create policy "allow delete badge_images"
+on public.badge_images
+for delete
+to anon, authenticated
+using (true);
+
+drop policy if exists "allow update badge_images" on public.badge_images;
+create policy "allow update badge_images"
+on public.badge_images
+for update
+to anon, authenticated
+using (true)
+with check (true);
+
 create or replace view public.v_badge_images_saved as
 select
   id,

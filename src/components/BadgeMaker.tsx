@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import * as fabric from 'fabric';
-import { RefreshCw, Upload, Save, Settings, Type } from 'lucide-react';
+import { RefreshCw, Upload, Save, Settings, Type, Edit2, Trash2 } from 'lucide-react';
 import { useDropzone } from 'react-dropzone';
 import { getSupabaseClient, SUPABASE_BADGE_SAVED_VIEW, SUPABASE_BADGE_TABLE } from '../lib/supabase';
+import VinhDanh from './VinhDanh';
 
 // Default configuration for the frame layout
 // These are initial guesses. The user can adjust them in "Setup Mode".
@@ -15,7 +16,7 @@ const DEFAULT_CONFIG = {
   text1X: 400,
   text1Y: 600,
   text2X: 400,
-  text2Y: 700,
+  text2Y: 715,
   text1Content: "DOANH SỐ",
   text1Color: "#FFFFFF",
   text2Color: "#FFFFFF",
@@ -23,6 +24,9 @@ const DEFAULT_CONFIG = {
 };
 
 const FIXED_FRAME_URL = new URL('../../frame.png', import.meta.url).href;
+const TOP1_FRAME_URL = new URL('../../top 1.png', import.meta.url).href;
+const TOP2_FRAME_URL = new URL('../../top 2.png', import.meta.url).href;
+const TOP3_FRAME_URL = new URL('../../top 3.png', import.meta.url).href;
 
 type SavedBadge = {
   id: number;
@@ -31,15 +35,17 @@ type SavedBadge = {
   created_at: string;
 };
 
-type ActiveTab = 'editor' | 'saved';
+type ActiveTab = 'editor' | 'saved' | 'vinhdanh';
 
 export default function BadgeMaker() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [fabricCanvas, setFabricCanvas] = useState<fabric.Canvas | null>(null);
   const [userImage, setUserImage] = useState<fabric.Image | null>(null);
   const [frameImage, setFrameImage] = useState<fabric.Image | null>(null);
+  const [text1Object, setText1Object] = useState<fabric.IText | null>(null);
   const [text2Object, setText2Object] = useState<fabric.IText | null>(null);
   
+  const [text1Value, setText1Value] = useState("DOANH SỐ");
   const [text2Value, setText2Value] = useState("");
   const [isSetupMode, setIsSetupMode] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -49,6 +55,8 @@ export default function BadgeMaker() {
   const [savedBadgesError, setSavedBadgesError] = useState<string | null>(null);
   const [selectedBadge, setSelectedBadge] = useState<SavedBadge | null>(null);
   const [activeTab, setActiveTab] = useState<ActiveTab>('editor');
+  const [editingBadge, setEditingBadge] = useState<SavedBadge | null>(null);
+  const [isDeleting, setIsDeleting] = useState<number | null>(null);
   
   const formatSupabaseError = (error: unknown): string => {
     if (error instanceof Error) {
@@ -75,14 +83,14 @@ export default function BadgeMaker() {
     return 'Không nhận được chi tiết lỗi từ Supabase.';
   };
 
-  const trimImageDataUrl = (dataUrl: string): Promise<string> => {
+  const removeBackgroundAndTrim = (dataUrl: string): Promise<string> => {
     return new Promise((resolve, reject) => {
       const image = new Image();
       image.onload = () => {
         const sourceCanvas = document.createElement('canvas');
         sourceCanvas.width = image.width;
         sourceCanvas.height = image.height;
-        const sourceCtx = sourceCanvas.getContext('2d');
+        const sourceCtx = sourceCanvas.getContext('2d', { willReadFrequently: true });
 
         if (!sourceCtx) {
           reject(new Error('Không thể tạo context để xử lý ảnh.'));
@@ -90,13 +98,36 @@ export default function BadgeMaker() {
         }
 
         sourceCtx.drawImage(image, 0, 0);
-        const { data, width, height } = sourceCtx.getImageData(0, 0, image.width, image.height);
+        const imageData = sourceCtx.getImageData(0, 0, image.width, image.height);
+        const { data, width, height } = imageData;
 
         let minX = width;
         let minY = height;
         let maxX = -1;
         let maxY = -1;
 
+        // Improved background detection - check for white/light gray backgrounds
+        // Also check corners to determine background color
+        const cornerColors: number[][] = [];
+        const cornerPositions = [
+          [0, 0], [width - 1, 0], [0, height - 1], [width - 1, height - 1]
+        ];
+        
+        cornerPositions.forEach(([x, y]) => {
+          const idx = (y * width + x) * 4;
+          cornerColors.push([data[idx], data[idx + 1], data[idx + 2]]);
+        });
+
+        // Calculate average background color from corners
+        const avgBg = cornerColors.reduce(
+          (acc, color) => [acc[0] + color[0], acc[1] + color[1], acc[2] + color[2]],
+          [0, 0, 0]
+        ).map(v => v / cornerColors.length);
+
+        // Threshold for background detection (more lenient)
+        const bgThreshold = 30;
+
+        // Process image to remove background and find bounds
         for (let y = 0; y < height; y += 1) {
           for (let x = 0; x < width; x += 1) {
             const index = (y * width + x) * 4;
@@ -105,30 +136,58 @@ export default function BadgeMaker() {
             const b = data[index + 2];
             const a = data[index + 3];
 
+            // Check if pixel is transparent
             const isTransparent = a <= 10;
-            const isNearWhite = r >= 245 && g >= 245 && b >= 245;
-            const isBackgroundPixel = isTransparent || isNearWhite;
+            
+            // Check if pixel matches background color (with threshold)
+            const colorDiff = Math.abs(r - avgBg[0]) + Math.abs(g - avgBg[1]) + Math.abs(b - avgBg[2]);
+            const isBackgroundColor = colorDiff < bgThreshold;
+            
+            // Check if pixel is near white (fallback)
+            const isNearWhite = r >= 240 && g >= 240 && b >= 240 && a > 200;
+            
+            // Check if pixel is light gray background
+            const isLightGray = r >= 230 && g >= 230 && b >= 230 && a > 200;
+            
+            const isBackgroundPixel = isTransparent || isBackgroundColor || isNearWhite || isLightGray;
 
             if (!isBackgroundPixel) {
+              // This is a foreground pixel
               if (x < minX) minX = x;
               if (y < minY) minY = y;
               if (x > maxX) maxX = x;
               if (y > maxY) maxY = y;
+            } else {
+              // Make background transparent
+              data[index + 3] = 0; // Set alpha to 0
             }
           }
         }
 
+        // Update image data with transparent background
+        sourceCtx.putImageData(imageData, 0, 0);
+
         if (maxX < minX || maxY < minY) {
-          resolve(dataUrl);
+          // No foreground found, return original with transparent background
+          resolve(sourceCanvas.toDataURL('image/png'));
           return;
         }
 
-        const padding = 2;
+        // Add padding
+        const padding = 5;
         const cropX = Math.max(0, minX - padding);
         const cropY = Math.max(0, minY - padding);
         const cropWidth = Math.min(width - cropX, maxX - minX + 1 + padding * 2);
-        const cropHeight = Math.min(height - cropY, maxY - minY + 1 + padding * 2);
+        
+        // Cut image at text1 position (DOANH SỐ) - cut below text1
+        const text1Bottom = config.text1Y + (config.textFontSize / 2) + 30; // text1Y + half font size + padding below
+        const maxHeightFromContent = maxY - minY + 1 + padding * 2;
+        const cropHeight = Math.min(
+          height - cropY, 
+          Math.min(maxHeightFromContent, text1Bottom - cropY)
+        );
 
+        // Create output canvas with transparent background
         const outputCanvas = document.createElement('canvas');
         outputCanvas.width = cropWidth;
         outputCanvas.height = cropHeight;
@@ -139,11 +198,20 @@ export default function BadgeMaker() {
           return;
         }
 
-        outputCtx.drawImage(sourceCanvas, cropX, cropY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
+        // Clear canvas (transparent)
+        outputCtx.clearRect(0, 0, cropWidth, cropHeight);
+        
+        // Draw cropped image
+        outputCtx.drawImage(
+          sourceCanvas, 
+          cropX, cropY, cropWidth, cropHeight, 
+          0, 0, cropWidth, cropHeight
+        );
+        
         resolve(outputCanvas.toDataURL('image/png'));
       };
 
-      image.onerror = () => reject(new Error('Không thể đọc dữ liệu ảnh để crop.'));
+      image.onerror = () => reject(new Error('Không thể đọc dữ liệu ảnh để xử lý.'));
       image.src = dataUrl;
     });
   };
@@ -157,7 +225,7 @@ export default function BadgeMaker() {
       const { data, error } = await supabase
         .from(SUPABASE_BADGE_SAVED_VIEW)
         .select('id, image_data, text2_value, created_at')
-        .limit(12);
+        .order('created_at', { ascending: false });
 
       if (error) {
         throw error;
@@ -170,6 +238,118 @@ export default function BadgeMaker() {
       setIsLoadingSavedBadges(false);
     }
   }, []);
+
+  const deleteBadge = async (badgeId: number) => {
+    if (!window.confirm('Bạn có chắc chắn muốn xóa ảnh này?')) {
+      return;
+    }
+
+    setIsDeleting(badgeId);
+    setSaveMessage(null);
+    
+    try {
+      const supabase = getSupabaseClient();
+      console.log('Deleting badge with ID:', badgeId);
+      console.log('Using table:', SUPABASE_BADGE_TABLE);
+      
+      const { data, error } = await supabase
+        .from(SUPABASE_BADGE_TABLE)
+        .delete()
+        .eq('id', badgeId)
+        .select();
+
+      console.log('Delete response:', { data, error });
+
+      if (error) {
+        console.error('Delete error:', error);
+        throw error;
+      }
+
+      // Reload badges after deletion
+      await loadSavedBadges();
+      if (selectedBadge?.id === badgeId) {
+        setSelectedBadge(null);
+      }
+      setSaveMessage('Đã xóa ảnh thành công.');
+    } catch (error) {
+      console.error('Error deleting badge:', error);
+      const errorMessage = formatSupabaseError(error);
+      setSaveMessage(`Lỗi khi xóa: ${errorMessage}`);
+      alert(`Lỗi khi xóa: ${errorMessage}`);
+    } finally {
+      setIsDeleting(null);
+    }
+  };
+
+  const editBadge = (badge: SavedBadge) => {
+    setEditingBadge(badge);
+    setActiveTab('editor');
+    
+    // Load image into canvas
+    if (fabricCanvas && badge.image_data) {
+      fabric.Image.fromURL(badge.image_data, (img) => {
+        // Clear existing user image
+        if (userImage) {
+          fabricCanvas.remove(userImage);
+        }
+        
+        // Add the loaded image
+        img.set({
+          left: config.canvasWidth / 2,
+          top: config.canvasHeight / 2,
+          originX: 'center',
+          originY: 'center',
+          selectable: true,
+          evented: true,
+          hasControls: true,
+          hasBorders: true,
+        });
+        
+        fabricCanvas.add(img);
+        setUserImage(img);
+        fabricCanvas.setActiveObject(img);
+        fabricCanvas.requestRenderAll();
+      });
+    }
+  };
+
+  const updateBadge = async () => {
+    if (!editingBadge || !fabricCanvas) return;
+    
+    setIsSaving(true);
+    setSaveMessage(null);
+
+    const rawDataURL = fabricCanvas.toDataURL({
+      format: 'png',
+      quality: 1,
+      multiplier: 1,
+    });
+    const dataURL = await removeBackgroundAndTrim(rawDataURL);
+
+    try {
+      const supabase = getSupabaseClient();
+      const { error } = await supabase
+        .from(SUPABASE_BADGE_TABLE)
+        .update({
+          image_data: dataURL,
+          text2_value: text2Value || "",
+        })
+        .eq('id', editingBadge.id);
+
+      if (error) {
+        throw error;
+      }
+
+      setSaveMessage('Đã cập nhật ảnh thành công.');
+      setEditingBadge(null);
+      await loadSavedBadges();
+    } catch (error) {
+      const message = formatSupabaseError(error);
+      setSaveMessage(`Cập nhật thất bại: ${message}`);
+    } finally {
+      setIsSaving(false);
+    }
+  };
 
   // Configuration state
   const [config, setConfig] = useState(DEFAULT_CONFIG);
@@ -201,12 +381,19 @@ export default function BadgeMaker() {
     }
   }, [activeTab, loadSavedBadges]);
 
+  // Handle Text 1 updates
+  useEffect(() => {
+    if (text1Object && fabricCanvas) {
+      text1Object.set({ text: text1Value || "DOANH SỐ" });
+      text1Object.set({ left: config.text1X });
+      fabricCanvas.requestRenderAll();
+    }
+  }, [text1Value, text1Object, fabricCanvas, config.text1X]);
+
   // Handle Text 2 updates
   useEffect(() => {
     if (text2Object && fabricCanvas) {
-      text2Object.set({ text: text2Value || "CỤM THỨ 2" });
-      // Re-apply position from config.
-      // We want it at config.text2X.
+      text2Object.set({ text: text2Value || "" });
       text2Object.set({ left: config.text2X });
       fabricCanvas.requestRenderAll();
     }
@@ -252,11 +439,16 @@ export default function BadgeMaker() {
       setText2Object(text2);
     }
 
+    // Ensure frame is always on top
+    if (frameImage) {
+      fabricCanvas.bringObjectToFront(frameImage);
+    }
+
     fabricCanvas.requestRenderAll();
   }, [config, fabricCanvas, userImage]);
 
   const setupDefaultObjects = async (canvas: fabric.Canvas) => {
-    // 1. Add Text 1 (Fixed)
+    // 1. Add Text 1 (Editable)
     const text1 = new fabric.IText(config.text1Content, {
       left: config.text1X,
       top: config.text1Y,
@@ -266,14 +458,15 @@ export default function BadgeMaker() {
       fontSize: config.textFontSize,
       fontWeight: 'bold',
       fill: config.text1Color,
-      selectable: false,
-      evented: false,
+      selectable: true,
+      evented: true,
       id: 'text1', // Custom ID for retrieval
     } as any);
     canvas.add(text1);
+    setText1Object(text1);
 
-    // 2. Add Text 2 (Dynamic)
-    const text2 = new fabric.IText("CỤM THỨ 2", {
+    // 2. Add Text 2 (Editable)
+    const text2 = new fabric.IText("", {
       left: config.text2X,
       top: config.text2Y,
       originX: 'center',
@@ -282,8 +475,8 @@ export default function BadgeMaker() {
       fontSize: config.textFontSize,
       fontWeight: 'bold',
       fill: config.text2Color,
-      selectable: false,
-      evented: false,
+      selectable: true,
+      evented: true,
       id: 'text2',
     } as any);
     canvas.add(text2);
@@ -305,8 +498,10 @@ export default function BadgeMaker() {
       canvas.add(frame);
       setFrameImage(frame);
       canvas.moveObjectTo(frame, 0);
+      // Frame should be on top, texts below frame
       canvas.bringObjectToFront(text1);
       canvas.bringObjectToFront(text2);
+      canvas.bringObjectToFront(frame);
       canvas.requestRenderAll();
     } catch (error) {
       console.error('Failed to load fixed frame image:', error);
@@ -362,15 +557,19 @@ export default function BadgeMaker() {
       fabricCanvas.add(img);
       setUserImage(img);
 
-      // Keep layer order stable: User Image < Frame < Text
+      // Keep layer order stable: User Image < Text < Frame (Frame on top)
       fabricCanvas.moveObjectTo(img, 0);
-      if (frameImage) {
-        fabricCanvas.moveObjectTo(frameImage, 1);
-      }
       const text1 = fabricCanvas.getObjects().find(o => (o as any).id === 'text1');
       const text2 = fabricCanvas.getObjects().find(o => (o as any).id === 'text2');
-      if (text1) fabricCanvas.bringObjectToFront(text1);
-      if (text2) fabricCanvas.bringObjectToFront(text2);
+      if (text1) {
+        fabricCanvas.bringObjectToFront(text1);
+      }
+      if (text2) {
+        fabricCanvas.bringObjectToFront(text2);
+      }
+      if (frameImage) {
+        fabricCanvas.bringObjectToFront(frameImage); // Frame must be on top
+      }
       
       fabricCanvas.setActiveObject(img);
       fabricCanvas.requestRenderAll();
@@ -378,33 +577,109 @@ export default function BadgeMaker() {
     reader.readAsDataURL(file);
   };
 
-  const saveToSupabase = async () => {
-    if (!fabricCanvas) return;
-    setIsSaving(true);
-    setSaveMessage(null);
-
+  const createImageWithFrame = async (frameUrl: string, frameName: string): Promise<string> => {
+    if (!fabricCanvas) throw new Error('Canvas not available');
+    
+    // Get current frame image from canvas (not state, to avoid race conditions)
+    const objects = fabricCanvas.getObjects();
+    const currentFrame = objects.find(o => o === frameImage) as fabric.Image;
+    
+    // Load new frame
+    const newFrame = await fabric.Image.fromURL(frameUrl);
+    newFrame.set({
+      left: 0,
+      top: 0,
+      originX: 'left',
+      originY: 'top',
+      selectable: false,
+      evented: false,
+      scaleX: config.canvasWidth / (newFrame.width || 1),
+      scaleY: config.canvasHeight / (newFrame.height || 1),
+    });
+    
+    // Replace frame
+    if (currentFrame) {
+      fabricCanvas.remove(currentFrame);
+    }
+    fabricCanvas.add(newFrame);
+    fabricCanvas.moveObjectTo(newFrame, 0);
+    
+    // Ensure frame is on top
+    const text1 = fabricCanvas.getObjects().find(o => (o as any).id === 'text1');
+    if (text1) {
+      fabricCanvas.bringObjectToFront(text1);
+    }
+    fabricCanvas.bringObjectToFront(newFrame); // Frame must be on top
+    
+    fabricCanvas.requestRenderAll();
+    
+    // Wait for render
+    await new Promise(resolve => setTimeout(resolve, 100));
+    
+    // Export image
     const rawDataURL = fabricCanvas.toDataURL({
       format: 'png',
       quality: 1,
       multiplier: 1,
     });
-    const dataURL = await trimImageDataUrl(rawDataURL);
+    const dataURL = await removeBackgroundAndTrim(rawDataURL);
+    
+    // Restore original frame
+    if (currentFrame) {
+      fabricCanvas.remove(newFrame);
+      fabricCanvas.add(currentFrame);
+      fabricCanvas.moveObjectTo(currentFrame, 0);
+      if (text1) {
+        fabricCanvas.bringObjectToFront(text1);
+      }
+      fabricCanvas.bringObjectToFront(currentFrame); // Frame must be on top
+      fabricCanvas.requestRenderAll();
+      // Wait a bit for restore to complete
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    
+    return dataURL;
+  };
+
+  const saveToSupabase = async () => {
+    if (!fabricCanvas) return;
+    setIsSaving(true);
+    setSaveMessage(null);
 
     try {
       const supabase = getSupabaseClient();
+      
+      // Create 3 images with different frames (sequentially to avoid race conditions)
+      const image1 = await createImageWithFrame(TOP1_FRAME_URL, 'top 1.png');
+      const image2 = await createImageWithFrame(TOP2_FRAME_URL, 'top 2.png');
+      const image3 = await createImageWithFrame(TOP3_FRAME_URL, 'top 3.png');
+
+      // Save all 3 images to database
       const { error } = await supabase
         .from(SUPABASE_BADGE_TABLE)
-        .insert({
-          image_data: dataURL,
-          text2_value: text2Value || "CỤM THỨ 2",
-          frame_asset: 'frame.png',
-        });
+        .insert([
+          {
+            image_data: image1,
+            text2_value: text2Value || "",
+            frame_asset: 'top 1.png',
+          },
+          {
+            image_data: image2,
+            text2_value: text2Value || "",
+            frame_asset: 'top 2.png',
+          },
+          {
+            image_data: image3,
+            text2_value: text2Value || "",
+            frame_asset: 'top 3.png',
+          },
+        ]);
 
       if (error) {
         throw error;
       }
 
-      setSaveMessage('Đã lưu ảnh vào Supabase thành công.');
+      setSaveMessage('Đã tạo và lưu 3 ảnh vào Supabase thành công.');
       loadSavedBadges();
     } catch (error) {
       const message = formatSupabaseError(error);
@@ -483,6 +758,14 @@ export default function BadgeMaker() {
         >
           Ảnh đã lưu
         </button>
+        <button
+          onClick={() => setActiveTab('vinhdanh')}
+          className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+            activeTab === 'vinhdanh' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+          }`}
+        >
+          Vinh Danh
+        </button>
       </div>
 
       <div className={`${activeTab === 'editor' ? 'flex' : 'hidden'} flex-col lg:flex-row flex-1 gap-4 min-h-0`}>
@@ -506,18 +789,34 @@ export default function BadgeMaker() {
 
             <hr className="border-gray-200" />
 
-            {/* Text Input */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Nhập nội dung (Cụm thứ 2)</label>
-              <div className="flex items-center gap-2">
-                <Type size={20} className="text-gray-400" />
-                <input 
-                  type="text" 
-                  value={text2Value}
-                  onChange={(e) => setText2Value(e.target.value)}
-                  placeholder="Ví dụ: NGUYỄN VĂN A"
-                  className="flex-1 border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none"
-                />
+            {/* Text Inputs */}
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Text 1 (DOANH SỐ)</label>
+                <div className="flex items-center gap-2">
+                  <Type size={20} className="text-gray-400" />
+                  <input 
+                    type="text" 
+                    value={text1Value}
+                    onChange={(e) => setText1Value(e.target.value)}
+                    placeholder="DOANH SỐ"
+                    className="flex-1 border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Text 2</label>
+                <div className="flex items-center gap-2">
+                  <Type size={20} className="text-gray-400" />
+                  <input 
+                    type="text" 
+                    value={text2Value}
+                    onChange={(e) => setText2Value(e.target.value)}
+                    placeholder="Nhập nội dung"
+                    className="flex-1 border border-gray-300 rounded-md px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none"
+                  />
+                </div>
               </div>
             </div>
 
@@ -567,24 +866,63 @@ export default function BadgeMaker() {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-gray-600">Vị trí Text 2 (Input)</label>
+                  <label className="block text-xs font-semibold text-gray-600">Vị trí Text 2</label>
                   <div className="grid grid-cols-2 gap-2 mt-1">
                     <input aria-label="Vị trí Text 2 X" type="number" value={config.text2X} onChange={e => setConfig({...config, text2X: Number(e.target.value)})} className="w-full border rounded px-2 py-1" />
                     <input aria-label="Vị trí Text 2 Y" type="number" value={config.text2Y} onChange={e => setConfig({...config, text2Y: Number(e.target.value)})} className="w-full border rounded px-2 py-1" />
                   </div>
                 </div>
+
               </div>
             )}
 
-            <div className="mt-auto pt-4">
-              <button 
-                onClick={saveToSupabase}
-                disabled={isSaving}
-                className="w-full flex items-center justify-center gap-2 bg-green-600 hover:bg-green-700 disabled:bg-green-300 text-white py-3 rounded-lg font-semibold shadow-sm transition"
-              >
-                <Save size={20} />
-                {isSaving ? 'Đang lưu...' : 'Lưu vào Supabase'}
-              </button>
+            {/* Editing Badge Info */}
+            {editingBadge && (
+              <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                <p className="text-sm font-semibold text-blue-800 mb-1">Đang chỉnh sửa ảnh</p>
+                <p className="text-xs text-gray-600">
+                  <strong>Doanh số:</strong> {editingBadge.text2_value || 'Chưa có'}
+                </p>
+                <p className="text-xs text-gray-600">
+                  <strong>Thời gian tạo:</strong> {new Date(editingBadge.created_at).toLocaleString('vi-VN')}
+                </p>
+              </div>
+            )}
+
+            <div className="mt-auto pt-4 space-y-2">
+              {editingBadge ? (
+                <>
+                  <button 
+                    onClick={updateBadge}
+                    disabled={isSaving}
+                    className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white py-3 rounded-lg font-semibold shadow-sm transition"
+                  >
+                    <Save size={20} />
+                    {isSaving ? 'Đang cập nhật...' : 'Cập nhật ảnh'}
+                  </button>
+                  <button 
+                    onClick={() => {
+                      setEditingBadge(null);
+                      if (userImage && fabricCanvas) {
+                        fabricCanvas.remove(userImage);
+                        setUserImage(null);
+                      }
+                    }}
+                    className="w-full flex items-center justify-center gap-2 bg-gray-500 hover:bg-gray-600 text-white py-2 rounded-lg font-semibold shadow-sm transition"
+                  >
+                    Hủy chỉnh sửa
+                  </button>
+                </>
+              ) : (
+                <button 
+                  onClick={saveToSupabase}
+                  disabled={isSaving}
+                  className="w-full flex items-center justify-center gap-2 bg-green-600 hover:bg-green-700 disabled:bg-green-300 text-white py-3 rounded-lg font-semibold shadow-sm transition"
+                >
+                  <Save size={20} />
+                  {isSaving ? 'Đang lưu...' : 'Lưu vào Supabase'}
+                </button>
+              )}
               {saveMessage && (
                 <p className="mt-2 text-sm text-gray-600">{saveMessage}</p>
               )}
@@ -625,35 +963,117 @@ export default function BadgeMaker() {
           <p className="text-sm text-red-600">Không thể tải ảnh đã lưu: {savedBadgesError}</p>
         )}
 
+        {saveMessage && (
+          <div className={`mb-4 p-3 rounded-lg text-sm ${
+            saveMessage.includes('thành công') 
+              ? 'bg-green-100 text-green-700 border border-green-300' 
+              : 'bg-red-100 text-red-700 border border-red-300'
+          }`}>
+            {saveMessage}
+          </div>
+        )}
+
         {!savedBadgesError && savedBadges.length === 0 && !isLoadingSavedBadges && (
           <p className="text-sm text-gray-500">Chưa có ảnh nào được lưu.</p>
         )}
 
-        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4">
-          {savedBadges.map((badge) => (
-            <button
-              key={badge.id}
-              type="button"
-              onClick={() => setSelectedBadge(badge)}
-              className="border rounded-lg overflow-hidden bg-white text-left hover:shadow-md transition cursor-zoom-in"
-              title="Xem ảnh rõ hơn"
-            >
-              <img
-                src={badge.image_data}
-                alt={badge.text2_value || `Badge ${badge.id}`}
-                className="w-full h-44 object-cover bg-gray-50"
-              />
-              <div className="p-2">
-                <p className="text-sm font-medium text-gray-700 truncate">
-                  {badge.text2_value || 'CỤM THỨ 2'}
-                </p>
-                <p className="text-xs text-gray-500">
-                  {new Date(badge.created_at).toLocaleString('vi-VN')}
-                </p>
-              </div>
-            </button>
-          ))}
-        </div>
+        {/* Group badges by text2_value (tên nhân sự) */}
+        {!savedBadgesError && savedBadges.length > 0 && (() => {
+          const groupedBadges = savedBadges.reduce((acc, badge) => {
+            const name = badge.text2_value || 'Chưa có tên';
+            if (!acc[name]) {
+              acc[name] = [];
+            }
+            acc[name].push(badge);
+            return acc;
+          }, {} as Record<string, SavedBadge[]>);
+
+          return (
+            <div className="space-y-6">
+              {Object.entries(groupedBadges).map(([name, badges]) => (
+                <div key={name} className="border rounded-lg overflow-hidden bg-gray-50">
+                  {/* Group Header */}
+                  <div className="bg-gradient-to-r from-blue-500 to-blue-600 px-4 py-3 border-b">
+                    <h3 className="text-lg font-bold text-white">{name}</h3>
+                    <p className="text-sm text-blue-100">{badges.length} ảnh</p>
+                  </div>
+                  
+                  {/* Badges Grid */}
+                  <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4 p-4">
+                    {badges.map((badge) => (
+                      <div
+                        key={badge.id}
+                        className="border rounded-lg overflow-hidden bg-white hover:shadow-md transition relative group"
+                      >
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            // Don't open modal if clicking on action buttons
+                            if ((e.target as HTMLElement).closest('.action-buttons')) {
+                              return;
+                            }
+                            setSelectedBadge(badge);
+                          }}
+                          className="w-full text-left"
+                          title="Xem ảnh rõ hơn"
+                        >
+                          <img
+                            src={badge.image_data}
+                            alt={name}
+                            className="w-full h-44 object-cover bg-gray-50"
+                          />
+                          <div className="p-2">
+                            <p className="text-xs text-gray-500">
+                              {new Date(badge.created_at).toLocaleString('vi-VN')}
+                            </p>
+                          </div>
+                        </button>
+                        
+                        {/* Action Buttons */}
+                        <div className="action-buttons absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-20">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              editBadge(badge);
+                            }}
+                            className="p-2 bg-blue-500 hover:bg-blue-600 text-white rounded-md shadow-lg transition"
+                            title="Sửa ảnh"
+                          >
+                            <Edit2 size={16} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async (e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              console.log('Delete button clicked for badge:', badge.id);
+                              await deleteBadge(badge.id);
+                            }}
+                            disabled={isDeleting === badge.id}
+                            className="p-2 bg-red-500 hover:bg-red-600 disabled:bg-red-300 text-white rounded-md shadow-lg transition z-10"
+                            title="Xóa ảnh"
+                          >
+                            {isDeleting === badge.id ? (
+                              <RefreshCw size={16} className="animate-spin" />
+                            ) : (
+                              <Trash2 size={16} />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          );
+        })()}
+      </div>
+
+      {/* Vinh Danh Tab */}
+      <div className={`${activeTab === 'vinhdanh' ? 'block' : 'hidden'} flex-1 overflow-hidden`}>
+        <VinhDanh />
       </div>
 
       {selectedBadge && (
@@ -682,7 +1102,6 @@ export default function BadgeMaker() {
                 className="w-full h-auto rounded-lg bg-gray-50"
               />
               <div className="mt-3 text-sm text-gray-600">
-                <p><strong>Nội dung:</strong> {selectedBadge.text2_value || 'CỤM THỨ 2'}</p>
                 <p><strong>Thời gian lưu:</strong> {new Date(selectedBadge.created_at).toLocaleString('vi-VN')}</p>
               </div>
             </div>
